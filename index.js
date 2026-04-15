@@ -28,6 +28,15 @@ async function initFirebase() {
 }
 
 async function startWhatsApp() {
+  // Limpar sessão antiga para forçar novo pareamento
+  const fs = require('fs')
+  try {
+    if (fs.existsSync('./auth_info')) {
+      fs.rmSync('./auth_info', { recursive: true, force: true })
+      console.log('Sessão antiga removida!')
+    }
+  } catch(e) { console.log('Sem sessão anterior') }
+
   try {
     const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys')
     const pino = require('pino')
