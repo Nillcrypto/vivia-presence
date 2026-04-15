@@ -107,7 +107,7 @@ const server = http.createServer((req, res) => {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="10">
+  <meta http-equiv="refresh" content="60">
   <title>VivIA Presence</title>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
