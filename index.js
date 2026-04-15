@@ -1,85 +1,162 @@
-const { Client, LocalAuth } = require('whatsapp-web.js')
-const admin = require('firebase-admin')
 const http = require('http')
-
-// Firebase
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: 'carwashea-27d00',
-    clientEmail: 'firebase-adminsdk-fbsvc@carwashea-27d00.iam.gserviceaccount.com',
-    privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
-  }),
-  databaseURL: 'https://carwashea-27d00-default-rtdb.firebaseio.com'
-})
-const db = admin.database()
 
 let pairingCode = null
 let connected = false
+let sock = null
 
-const client = new Client({
-  authStrategy: new LocalAuth(),
-  puppeteer: { args: ['--no-sandbox','--disable-setuid-sandbox'] }
-})
+async function startWhatsApp() {
+  try {
+    const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys')
+    const pino = require('pino')
+    const { initializeApp, cert } = require('firebase-admin/app')
+    const { getDatabase } = require('firebase-admin/database')
 
-client.on('qr', () => {
-  console.log('QR gerado, solicitando codigo de pareamento...')
-})
+    // Firebase
+    const firebasePrivateKey = (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
+    initializeApp({
+      credential: cert({
+        projectId: 'carwashea-27d00',
+        clientEmail: 'firebase-adminsdk-fbsvc@carwashea-27d00.iam.gserviceaccount.com',
+        privateKey: firebasePrivateKey
+      }),
+      databaseURL: 'https://carwashea-27d00-default-rtdb.firebaseio.com'
+    })
+    const db = getDatabase()
 
-client.on('ready', () => {
-  connected = true
-  pairingCode = null
-  console.log('WhatsApp conectado!')
-})
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info')
+    const logger = pino({ level: 'silent' })
 
-client.on('disconnected', () => {
-  connected = false
-  console.log('Desconectado. Reiniciando...')
-  setTimeout(() => client.initialize(), 5000)
-})
+    sock = makeWASocket({
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger)
+      },
+      logger,
+      printQRInTerminal: false,
+      browser: ['VivIA', 'Chrome', '1.0']
+    })
 
-// Detectar presenca dos contatos
-client.on('change_battery', (batteryInfo) => {
-  console.log('Battery:', batteryInfo)
-})
+    sock.ev.on('creds.update', saveCreds)
 
-client.initialize()
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+      if (connection === 'open') {
+        connected = true
+        pairingCode = null
+        console.log('✅ WhatsApp conectado!')
+      }
+
+      if (connection === 'close') {
+        connected = false
+        const code = lastDisconnect?.error?.output?.statusCode
+        if (code !== DisconnectReason.loggedOut) {
+          console.log('Reconectando em 5s...')
+          setTimeout(startWhatsApp, 5000)
+        } else {
+          console.log('Deslogado. Precisa parear novamente.')
+        }
+      }
+
+      // Gerar pairing code quando não registrado
+      if (!sock.authState.creds.registered && !pairingCode) {
+        await new Promise(r => setTimeout(r, 2000))
+        try {
+          const number = process.env.WA_NUMBER || '5528999994692'
+          pairingCode = await sock.requestPairingCode(number)
+          console.log('📱 CÓDIGO DE PAREAMENTO:', pairingCode)
+        } catch(e) {
+          console.log('Erro ao gerar código:', e.message)
+        }
+      }
+    })
+
+    // Detectar online/offline dos contatos
+    sock.ev.on('presence.update', async ({ id, presences }) => {
+      try {
+        for (const [jid, presence] of Object.entries(presences)) {
+          const number = jid.replace('@s.whatsapp.net', '').replace('@g.us', '')
+          const status = presence.lastKnownPresence === 'available' ? 'online' : 'offline'
+          const timestamp = Date.now()
+
+          console.log(`📊 ${number} → ${status}`)
+
+          // Salvar no Firebase
+          await db.ref(`vivia_presence/${number}`).set({
+            status,
+            timestamp,
+            updated_at: new Date().toISOString()
+          })
+
+          // Histórico
+          await db.ref(`vivia_presence_historico/${number}/${timestamp}`).set({
+            status,
+            updated_at: new Date().toISOString()
+          })
+        }
+      } catch(e) {
+        console.error('Erro ao salvar presence:', e.message)
+      }
+    })
+
+  } catch(e) {
+    console.error('Erro ao iniciar WhatsApp:', e.message)
+    setTimeout(startWhatsApp, 10000)
+  }
+}
 
 // Servidor HTTP
 const server = http.createServer((req, res) => {
-  if (req.url === '/code') {
+  const url = req.url
+
+  if (url === '/code' || url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="15">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="10">
   <title>VivIA Presence</title>
   <style>
-    body{background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:Arial,sans-serif;margin:0}
-    .code{font-size:60px;font-weight:bold;color:#111;letter-spacing:16px;margin:24px 0;padding:20px 40px;border:3px solid #eee;border-radius:16px}
-    .title{font-size:22px;color:#333;margin-bottom:8px}
-    .sub{font-size:15px;color:#666;text-align:center;max-width:400px;line-height:1.6}
-    .ok{font-size:32px;color:green}
-    .wait{font-size:18px;color:#e67e22}
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#ffffff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:Arial,sans-serif;padding:20px}
+    .logo{font-size:20px;color:#333;font-weight:bold;margin-bottom:8px}
+    .sub{font-size:13px;color:#888;margin-bottom:32px}
+    .code-box{font-size:56px;font-weight:bold;color:#111;letter-spacing:14px;padding:24px 40px;border:2px solid #ddd;border-radius:16px;background:#f9f9f9;margin-bottom:20px}
+    .instrucao{font-size:14px;color:#555;text-align:center;max-width:320px;line-height:1.7}
+    .conectado{font-size:28px;color:#22c55e;font-weight:bold}
+    .aguardando{font-size:16px;color:#f59e0b}
+    .atualiza{font-size:11px;color:#bbb;margin-top:20px}
   </style>
 </head>
 <body>
-  <div class="title">VivIA WhatsApp Presence</div>
+  <div class="logo">👩🏻‍💻 VivIA Presence</div>
+  <div class="sub">Monitor de Contatos WhatsApp</div>
   ${connected
-    ? '<div class="ok">WhatsApp Conectado!</div>'
+    ? '<div class="conectado">✅ WhatsApp Conectado!</div>'
     : pairingCode
-      ? `<div class="code">${pairingCode}</div>
-         <div class="sub">Abra o WhatsApp > Dispositivos vinculados > Vincular com numero de telefone > Digite o codigo acima</div>`
-      : '<div class="wait">Aguardando codigo... (atualiza em 15s)</div>'
+      ? `<div class="code-box">${pairingCode}</div>
+         <div class="instrucao">
+           Abra o <strong>WhatsApp</strong><br>
+           → Dispositivos vinculados<br>
+           → Vincular com número de telefone<br>
+           → Digite o código acima
+         </div>`
+      : '<div class="aguardando">⏳ Gerando código...</div>'
   }
+  <div class="atualiza">Atualiza automaticamente a cada 10s</div>
 </body>
 </html>`)
-  } else {
+  } else if (url === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ connected, pairing_code: pairingCode }))
+    res.end(JSON.stringify({ connected, pairing_code: pairingCode, ts: Date.now() }))
+  } else {
+    res.writeHead(200)
+    res.end('VivIA Presence OK')
   }
 })
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log('Servidor na porta', process.env.PORT || 3000)
+const PORT = process.env.PORT || 3000
+server.listen(PORT, () => {
+  console.log(`🚀 Servidor na porta ${PORT}`)
+  startWhatsApp()
 })
