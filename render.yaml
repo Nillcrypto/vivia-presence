@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: vivia-presence
+    runtime: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: WA_NUMBER
+        value: "5528999994692"
+      - key: NODE_ENV
+        value: production
